@@ -118,3 +118,24 @@ learning:
   similarity:
     backend: exact # exact | embedding
     threshold: 0.85
+
+# Skill registry (ADR-010)
+skills:
+  scan_paths:
+    - .claude/skills # Drop SKILL.md files here to register custom skills
+
+
+# Local model integration (ADR-009)
+# local_model:
+#   enabled: false
+#   provider: ollama         # ollama | lm-studio | llama-cpp
+#   endpoint: http://localhost:11434
+#   embedding_model: nomic-embed-text
+#   classifier_model: llama3.2:3b
+#   summarizer_model: llama3.2:3b
+#   generator_model: ""      # optional: replaces Phase 2/3 Claude call (experimental)
+#   summarizer_strategy: claude  # claude | local | skill | both
+#   timeout_seconds: 10
+#   fail_open: true
+#   per_phase:
+#     phase_2: claude        # claude | local

@@ -76,17 +76,29 @@ OPT_MODEL=""
 OPT_CONFIG="orchestrator/config.yml"
 OPT_DRY_RUN=false
 OPT_FEATURE=""
-OPT_RESUME=false
+OPT_RESUME_FEAT=""
+OPT_RESUME_ACK=false
+OPT_RESCAN_SKILLS=false
 OPT_SKIP_CYCLE_CHECK=false
 OPT_SAMPLE=10
 OPT_LEARNING_ACTION=""
 OPT_LEARNING_ID=""
 OPT_LEARNING_CANDIDATES=false
+OPT_INGEST_FEAT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    init|run|status|clean|calibrate|learning|promote-learning)
+    init|run|status|clean|calibrate|learning|promote-learning|ingest-status|skills)
       SUBCOMMAND="$1"
+      ;;
+    --resume-paused)
+      shift; OPT_RESUME_FEAT="$1"; SUBCOMMAND="resume-paused"
+      ;;
+    --ack)
+      OPT_RESUME_ACK=true
+      ;;
+    --rescan-skills)
+      OPT_RESCAN_SKILLS=true
       ;;
     --autonomy)
       shift; OPT_AUTONOMY="$1"
@@ -106,9 +118,6 @@ while [ $# -gt 0 ]; do
     --plan|--dry-run)
       OPT_DRY_RUN=true
       ;;
-    --resume)
-      OPT_RESUME=true
-      ;;
     --skip-cycle-check)
       OPT_SKIP_CYCLE_CHECK=true
       ;;
@@ -119,45 +128,49 @@ while [ $# -gt 0 ]; do
       OPT_LEARNING_CANDIDATES=true
       ;;
     list|archive|promote)
-      # Sub-subcommands for the learning subcommand
       [ "$SUBCOMMAND" = "learning" ] && OPT_LEARNING_ACTION="$1"
       ;;
     --help|-h)
       echo "Usage: orchestrate.sh <command> [flags]"
       echo ""
       echo "Commands:"
-      echo "  init                       Scaffold config, .env, features.md, .gitignore"
-      echo "  run                        Execute the orchestration loop"
-      echo "  status                     Show current orchestrator state"
-      echo "  clean                      Remove all worktrees and reset state"
-      echo "  calibrate                  Show token-cost calibration guidance"
-      echo "  learning list              List all learning entries"
-      echo "  learning list --candidates List only promotion candidates"
-      echo "  learning archive <id>      Archive a learning entry by ID"
-      echo "  learning promote <id>      Promote a project entry to global tier"
-      echo "  promote-learning <id>      Alias for: learning promote <id>"
+      echo "  init                         Scaffold config, .env, features.md, .gitignore"
+      echo "  run                          Execute the orchestration loop"
+      echo "  status                       Show current orchestrator state"
+      echo "  clean                        Remove all worktrees and reset state"
+      echo "  calibrate                    Show token-cost calibration guidance"
+      echo "  learning list                List all learning entries"
+      echo "  learning list --candidates   List only promotion candidates"
+      echo "  learning archive <id>        Archive a learning entry by ID"
+      echo "  learning promote <id>        Promote a project entry to global tier"
+      echo "  promote-learning <id>        Alias for: learning promote <id>"
+      echo "  skills                       List registered skills"
+      echo "  ingest-status                Show active background ingest jobs (ADR-009/ADR-010)"
       echo ""
       echo "Flags:"
-      echo "  --autonomy <level>         supervised | checkpoint | full_auto"
-      echo "  --adapter <type>           markdown | github | linear"
-      echo "  --model <name>             opus | sonnet | haiku | opusplan"
-      echo "  --config <path>            Config file (default: orchestrator/config.yml)"
-      echo "  --feature <id>             Run only the specified feature"
-      echo "  --plan, --dry-run          Show plan without executing"
-      echo "  --resume                   Skip completed, run pending"
-      echo "  --skip-cycle-check         Skip the cycle-completion gate"
-      echo "  --sample <n>               Sample size for calibrate (default: 10)"
-      echo "  --help                     Show this help"
+      echo "  --autonomy <level>           supervised | checkpoint | full_auto"
+      echo "  --adapter <type>             markdown | github | linear"
+      echo "  --model <name>              opus | sonnet | haiku | opusplan"
+      echo "  --config <path>              Config file (default: orchestrator/config.yml)"
+      echo "  --feature <id>              Run only the specified feature"
+      echo "  --plan, --dry-run            Show plan without executing"
+      echo "  --resume-paused <feat-id>    Resume a paused feature from its checkpoint"
+      echo "  --ack                        Acknowledge human-class pauses for --resume-paused"
+      echo "  --rescan-skills              Force re-scan and rebuild the skill registry"
+      echo "  --skip-cycle-check           Skip the cycle-completion gate"
+      echo "  --sample <n>                 Sample size for calibrate (default: 10)"
+      echo "  --help                       Show this help"
       exit 0
       ;;
     *)
-      # Capture positional arguments for subcommands that need them (e.g. learning archive <id>)
       if [ "$SUBCOMMAND" = "learning" ] && [ -z "$OPT_LEARNING_ACTION" ]; then
         OPT_LEARNING_ACTION="$1"
       elif [ "$SUBCOMMAND" = "learning" ] && [ -z "$OPT_LEARNING_ID" ]; then
         OPT_LEARNING_ID="$1"
       elif [ "$SUBCOMMAND" = "promote-learning" ] && [ -z "$OPT_LEARNING_ID" ]; then
         OPT_LEARNING_ID="$1"
+      elif [ "$SUBCOMMAND" = "ingest-reviews" ] && [ -z "$OPT_INGEST_FEAT" ]; then
+        OPT_INGEST_FEAT="$1"
       else
         err "Unknown argument: $1"
         err "Run: ./scripts/orchestrate.sh --help"
@@ -297,6 +310,7 @@ STARTER
 
 sub_run() {
   # Load modules
+  source "$LIB_DIR/util.sh"
   source "$LIB_DIR/config.sh"
   source "$LIB_DIR/worktree.sh"
   source "$LIB_DIR/memory.sh"
@@ -307,12 +321,16 @@ sub_run() {
   source "$LIB_DIR/learning.sh"
   source "$LIB_DIR/size_gate.sh"
   source "$LIB_DIR/cycle_gate.sh"
+  # ADR-009 modules (optional — loaded if present)
+  [ -f "$LIB_DIR/local_model.sh" ] && source "$LIB_DIR/local_model.sh"
+  [ -f "$LIB_DIR/ingest.sh"      ] && source "$LIB_DIR/ingest.sh"
+  # ADR-010 modules
+  source "$LIB_DIR/skills.sh"
   source "$LIB_DIR/runner.sh"
 
   # Resolve config file — check multiple locations
   local config_file="$OPT_CONFIG"
   if [ ! -f "$config_file" ]; then
-    # Try .orchestrator/config.yaml (new standard)
     if [ -f ".orchestrator/config.yaml" ]; then
       config_file=".orchestrator/config.yaml"
     elif [ -f ".orchestrator/config.yml" ]; then
@@ -332,6 +350,25 @@ sub_run() {
   mkdir -p "$STATE_DIR" "$RESULTS_DIR"
 
   banner "Orchestrate — $ADAPTER / $AUTONOMY / $BASE_BRANCH / model:$MODEL_DEFAULT"
+
+  # ADR-010: reap any finished background ingest jobs from prior sessions
+  if declare -f ingest_reap_stale &>/dev/null; then
+    ingest_reap_stale || true
+  fi
+
+  # ADR-010: initialise skill registry (force if --rescan-skills passed)
+  SKILLS_REGISTRY_FILE="$STATE_DIR/skill-registry.json"
+  export SKILLS_REGISTRY_FILE SKILLS_SCAN_PATHS="${ROOT_DIR}/.claude/skills"
+  if [ "$OPT_RESCAN_SKILLS" = "true" ]; then
+    skills_init --force
+  else
+    skills_init
+  fi
+
+  # ADR-009 PR-E: startup health check (when local_model.sh is present)
+  if declare -f local_model_health_check &>/dev/null; then
+    local_model_health_check || true
+  fi
 
   # Agent discovery (ADR-006)
   local manifest_file="$CONFIG_DIR/agents-manifest.json"
@@ -523,6 +560,92 @@ sub_promote_learning() {
 }
 
 # ══════════════════════════════════════════════════════════════════
+# Subcommand: resume-paused (ADR-010)
+# ══════════════════════════════════════════════════════════════════
+
+sub_resume_paused() {
+  if [ -z "$OPT_RESUME_FEAT" ]; then
+    err "Usage: ./scripts/orchestrate.sh --resume-paused <feat-id> [--ack]"
+    exit 1
+  fi
+
+  source "$LIB_DIR/util.sh"
+  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/worktree.sh"
+  source "$LIB_DIR/memory.sh"
+  source "$LIB_DIR/display.sh"
+  source "$LIB_DIR/cost.sh"
+  source "$LIB_DIR/router.sh"
+  source "$LIB_DIR/learning.sh"
+  source "$LIB_DIR/size_gate.sh"
+  source "$LIB_DIR/cycle_gate.sh"
+  [ -f "$LIB_DIR/local_model.sh" ] && source "$LIB_DIR/local_model.sh"
+  [ -f "$LIB_DIR/ingest.sh"      ] && source "$LIB_DIR/ingest.sh"
+  source "$LIB_DIR/skills.sh"
+  source "$LIB_DIR/runner.sh"
+
+  local config_file="$OPT_CONFIG"
+  if [ ! -f "$config_file" ]; then
+    [ -f ".orchestrator/config.yaml" ] && config_file=".orchestrator/config.yaml"
+    [ -f ".orchestrator/config.yml"  ] && config_file=".orchestrator/config.yml"
+    [ -f "orchestrator/config.yml"   ] && config_file="orchestrator/config.yml"
+  fi
+  load_config "$config_file" 2>/dev/null || true
+
+  WORKTREE_ROOT="$ROOT_DIR/$WORKTREE_BASE"
+  export ROOT_DIR CONFIG_DIR STATE_DIR RESULTS_DIR WORKTREE_ROOT
+  export WORKTREE_BASE BRANCH_PREFIX BASE_BRANCH ADAPTER AUTONOMY MODEL_DEFAULT MODEL_PLAN MODEL_EXECUTE
+  mkdir -p "$STATE_DIR" "$RESULTS_DIR"
+
+  SKILLS_REGISTRY_FILE="$STATE_DIR/skill-registry.json"
+  export SKILLS_REGISTRY_FILE SKILLS_SCAN_PATHS="${ROOT_DIR}/.claude/skills"
+  skills_init
+
+  banner "Resume Paused — $OPT_RESUME_FEAT"
+
+  local ack_flag=""
+  [ "$OPT_RESUME_ACK" = "true" ] && ack_flag="--ack"
+
+  run_feature_resume "$OPT_RESUME_FEAT" $ack_flag
+}
+
+# ══════════════════════════════════════════════════════════════════
+# Subcommand: skills (ADR-010)
+# ══════════════════════════════════════════════════════════════════
+
+sub_skills() {
+  source "$LIB_DIR/util.sh"
+  source "$LIB_DIR/skills.sh"
+
+  mkdir -p "$STATE_DIR"
+  SKILLS_REGISTRY_FILE="$STATE_DIR/skill-registry.json"
+  export SKILLS_REGISTRY_FILE SKILLS_SCAN_PATHS="${ROOT_DIR}/.claude/skills"
+
+  if [ "$OPT_RESCAN_SKILLS" = "true" ]; then
+    banner "Rescan Skills"
+    skills_init --force
+  fi
+
+  banner "Registered Skills"
+  skill_list
+}
+
+# ══════════════════════════════════════════════════════════════════
+# Subcommand: ingest-status (ADR-010)
+# ══════════════════════════════════════════════════════════════════
+
+sub_ingest_status() {
+  [ -f "$LIB_DIR/ingest.sh" ] && source "$LIB_DIR/ingest.sh" || true
+
+  banner "Background Ingest Status"
+  if declare -f ingest_status &>/dev/null; then
+    ingest_status
+  else
+    info "ingest.sh not loaded — no background ingest infrastructure present."
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════
 # Dispatch
 # ══════════════════════════════════════════════════════════════════
 
@@ -534,4 +657,7 @@ case "$SUBCOMMAND" in
   calibrate)       sub_calibrate ;;
   learning)        sub_learning ;;
   promote-learning) sub_promote_learning ;;
+  resume-paused)   sub_resume_paused ;;
+  skills)          sub_skills ;;
+  ingest-status)   sub_ingest_status ;;
 esac
